@@ -13,7 +13,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
+	"regexp"
 	"time"
 
 	aws "github.com/aws/aws-sdk-go-v2/aws"
@@ -31,7 +33,16 @@ const (
 	awsCodeArtifactDateFormat    = "20060102T150405Z"
 	awsCodeArtifactSTSRequestUrl = "https://sts.amazonaws.com"
 	awsCodeArtifactTokenURLPath  = "/v1/authorization-token" //nolint:gosec // URL path, not a credential
+
+	dockerHubIdentityHost      = "identity.docker.com"
+	dockerHubIdentityStageHost = "identity-stage.docker.com"
+	dockerHubDefaultExpiresIn  = 300
+	dockerHubMinExpiresIn      = 300
+	dockerHubMaxExpiresIn      = 3600
+	dockerHubMaxRetries        = 5
 )
+
+var dockerHubConnectionIDRe = regexp.MustCompile(`(?i)\A[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z`)
 
 // tokenResponse represents the response from GitHub's OIDC provider
 type tokenResponse struct {
@@ -185,6 +196,10 @@ type cloudsmithTokenRequest struct {
 
 type cloudsmithTokenResponse struct {
 	Token string `json:"token"`
+}
+
+type dockerHubTokenResponse struct {
+	AccessToken string `json:"access_token"`
 }
 
 // GCP STS token exchange request body (camelCase per Google's gRPC-transcoded JSON convention)
@@ -679,6 +694,84 @@ func GetCloudsmithAccessTokenForDevOps(ctx context.Context, params CloudsmithOID
 	return cloudsmithToken, nil
 }
 
+func GetDockerHubAccessToken(ctx context.Context, params DockerHubOIDCParameters, githubToken string) (*OIDCAccessToken, error) {
+	if params.ConnectionID == "" {
+		return nil, fmt.Errorf("connection-id is required")
+	}
+	if !dockerHubConnectionIDRe.MatchString(params.ConnectionID) {
+		return nil, fmt.Errorf("invalid connection-id: must be a valid UUID")
+	}
+	if params.Username == "" {
+		return nil, fmt.Errorf("username is required")
+	}
+	if githubToken == "" {
+		return nil, fmt.Errorf("GitHub token is required")
+	}
+
+	identityHost, err := getDockerHubIdentityHost(params.Registry)
+	if err != nil {
+		return nil, err
+	}
+
+	expiresIn, err := getDockerHubExpiresIn(params.ExpiresIn)
+	if err != nil {
+		return nil, err
+	}
+
+	formData := url.Values{}
+	formData.Set("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange")
+	formData.Set("subject_token_type", "urn:ietf:params:oauth:token-type:id_token")
+	formData.Set("subject_token", githubToken)
+	formData.Set("connection_id", params.ConnectionID)
+	formData.Set("expires_in", strconv.Itoa(expiresIn))
+
+	body, statusCode, err := postDockerHubTokenWithRetry(ctx, fmt.Sprintf("https://%s/oauth/token", identityHost), formData)
+	if err != nil {
+		return nil, err
+	}
+
+	if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
+		return nil, parseDockerHubError(statusCode, body)
+	}
+
+	var tokenResp dockerHubTokenResponse
+	if err := json.Unmarshal(body, &tokenResp); err != nil {
+		return nil, fmt.Errorf("failed to parse Docker Hub token response: %w", err)
+	}
+
+	if tokenResp.AccessToken == "" {
+		return nil, fmt.Errorf("Docker Hub token response does not contain an access token")
+	}
+
+	return &OIDCAccessToken{
+		Token:     tokenResp.AccessToken,
+		ExpiresIn: time.Duration(expiresIn) * time.Second,
+	}, nil
+}
+
+func GetDockerHubAccessTokenForDevOps(ctx context.Context, params DockerHubOIDCParameters) (*OIDCAccessToken, error) {
+	if !IsOIDCConfigured() {
+		return nil, fmt.Errorf("GitHub Actions OIDC is not configured")
+	}
+
+	identityHost, err := getDockerHubIdentityHost(params.Registry)
+	if err != nil {
+		return nil, err
+	}
+
+	githubToken, err := GetToken(ctx, "https://"+identityHost)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get GitHub OIDC token: %w", err)
+	}
+
+	dockerHubToken, err := GetDockerHubAccessToken(ctx, params, githubToken)
+	if err != nil {
+		return nil, fmt.Errorf("failed to exchange GitHub token for Docker Hub token: %w", err)
+	}
+
+	return dockerHubToken, nil
+}
+
 func GetGCPAccessToken(ctx context.Context, params GCPOIDCParameters, githubToken string) (*OIDCAccessToken, error) {
 	if params.WorkloadIdentityProvider == "" {
 		return nil, fmt.Errorf("workload-identity-provider is required")
@@ -831,6 +924,111 @@ func GetGCPAccessTokenForDevOps(ctx context.Context, params GCPOIDCParameters) (
 	}
 
 	return gcpToken, nil
+}
+
+func getDockerHubIdentityHost(registry string) (string, error) {
+	if !isDockerHubRegistry(registry) {
+		return "", fmt.Errorf("unsupported Docker Hub registry: %s", registry)
+	}
+	if strings.Contains(strings.ToLower(registry), "registry-1-stage.docker.io") {
+		return dockerHubIdentityStageHost, nil
+	}
+	return dockerHubIdentityHost, nil
+}
+
+func getDockerHubExpiresIn(raw string) (int, error) {
+	if strings.TrimSpace(raw) == "" {
+		return dockerHubDefaultExpiresIn, nil
+	}
+
+	expiresIn, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || expiresIn < dockerHubMinExpiresIn || expiresIn > dockerHubMaxExpiresIn {
+		return 0, fmt.Errorf("invalid expires-in: must be between %d and %d", dockerHubMinExpiresIn, dockerHubMaxExpiresIn)
+	}
+
+	return expiresIn, nil
+}
+
+func postDockerHubTokenWithRetry(ctx context.Context, tokenURL string, formData url.Values) ([]byte, int, error) {
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+
+	for attempt := 0; ; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(formData.Encode()))
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to create Docker Hub token request: %w", err)
+		}
+
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("User-Agent", "dependabot-proxy/1.0")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to execute Docker Hub token request: %w", err)
+		}
+
+		body, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			return nil, 0, fmt.Errorf("failed to read Docker Hub token response body: %w", readErr)
+		}
+
+		if resp.StatusCode != http.StatusTooManyRequests || attempt >= dockerHubMaxRetries {
+			return body, resp.StatusCode, nil
+		}
+
+		retryAfter, ok := parseDockerHubRetryAfter(resp.Header.Get("Retry-After"))
+		if !ok {
+			return body, resp.StatusCode, nil
+		}
+
+		timer := time.NewTimer(retryAfter)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, 0, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func parseDockerHubRetryAfter(value string) (time.Duration, bool) {
+	if strings.TrimSpace(value) == "" {
+		return 0, false
+	}
+
+	seconds, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil {
+		return 0, false
+	}
+
+	if seconds < 0 {
+		seconds = 0
+	}
+
+	return time.Duration(seconds) * time.Second, true
+}
+
+func parseDockerHubError(statusCode int, body []byte) error {
+	if statusCode == http.StatusUnauthorized {
+		return fmt.Errorf("Docker Hub API: operation not permitted")
+	}
+
+	var errResp map[string]string
+	if len(body) > 0 && json.Unmarshal(body, &errResp) == nil {
+		for _, key := range []string{"description", "message", "detail", "error"} {
+			if errResp[key] != "" {
+				return fmt.Errorf("Docker Hub API: bad status code %d: %s", statusCode, errResp[key])
+			}
+		}
+	}
+
+	if len(body) > 0 {
+		return fmt.Errorf("Docker Hub API: bad status code %d: %s", statusCode, string(body))
+	}
+
+	return fmt.Errorf("Docker Hub API: bad status code %d", statusCode)
 }
 
 func calculateContentSha256Header(payload []byte) string {
