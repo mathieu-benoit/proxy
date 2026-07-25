@@ -13,9 +13,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
-	"regexp"
 	"time"
 
 	aws "github.com/aws/aws-sdk-go-v2/aws"
