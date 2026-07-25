@@ -162,6 +162,70 @@ func TestFailedAuthenticationIsNotRetried(t *testing.T) {
 	assert.Equal(t, 1, requestsReceived, "expected only one token request due to failed authentication being cached")
 }
 
+func TestShortLivedDockerHubAuthenticationIsCached(t *testing.T) {
+	os.Setenv(envActionsIDTokenRequestURL, "https://example.com/token")
+	os.Setenv(envActionsIDTokenRequestToken, "test-token")
+	defer func() {
+		os.Unsetenv(envActionsIDTokenRequestURL)
+		os.Unsetenv(envActionsIDTokenRequestToken)
+	}()
+
+	creds, err := CreateOIDCCredential(config.Credential{
+		"type":          "docker_registry",
+		"registry":      "registry-1.docker.io",
+		"username":      "my-org",
+		"connection-id": "123e4567-e89b-42d3-a456-426614174000",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error creating OIDC credential: %v", err)
+	}
+
+	_, ok := creds.parameters.(*DockerHubOIDCParameters)
+	if !ok {
+		t.Fatalf("expected DockerHubOIDCParameters, but got %T", creds.parameters)
+	}
+
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset()
+
+	jsonResponder, err := httpmock.NewJsonResponder(200, tokenResponse{
+		Count: 1,
+		Value: "github-id-token",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error creating JSON responder: %v", err)
+	}
+	httpmock.RegisterResponder("GET", "https://example.com/token?audience=https%3A%2F%2Fidentity.docker.com", jsonResponder)
+
+	requestsReceived := 0
+	httpmock.RegisterResponder("POST", "https://identity.docker.com/oauth/token", func(req *http.Request) (*http.Response, error) {
+		requestsReceived++
+		status := 200
+		body := `{"access_token":"__dockerhub_token__"}`
+		return &http.Response{
+			Status:        fmt.Sprintf("%03d %s", status, http.StatusText(status)),
+			StatusCode:    status,
+			Body:          io.NopCloser(strings.NewReader(body)),
+			Header:        http.Header{},
+			ContentLength: -1,
+		}, nil
+	})
+
+	ctx := context.Background()
+	token, err := GetOrRefreshOIDCToken(creds, ctx)
+	if err != nil {
+		t.Fatalf("unexpected error getting OIDC token on first try")
+	}
+	assert.Equal(t, "__dockerhub_token__", token)
+
+	token, err = GetOrRefreshOIDCToken(creds, ctx)
+	if err != nil {
+		t.Fatalf("unexpected error getting OIDC token on second try")
+	}
+	assert.Equal(t, "__dockerhub_token__", token)
+	assert.Equal(t, 1, requestsReceived, "expected only one Docker Hub token request due to successful authentication being cached")
+}
+
 func TestTryCreateOIDCCredential(t *testing.T) {
 	tests := []struct {
 		name               string
@@ -354,6 +418,56 @@ func TestTryCreateOIDCCredential(t *testing.T) {
 				ServiceAccount:           "",
 				Audience:                 "custom-audience",
 			},
+		},
+		{
+			"dockerhub",
+			config.Credential{
+				"type":          "docker_registry",
+				"registry":      "registry-1.docker.io",
+				"username":      "my-org",
+				"connection-id": "123e4567-e89b-42d3-a456-426614174000",
+			},
+			&DockerHubOIDCParameters{
+				ConnectionID: "123e4567-e89b-42d3-a456-426614174000",
+				Username:     "my-org",
+				ExpiresIn:    "",
+				Registry:     "registry-1.docker.io",
+			},
+		},
+		{
+			"dockerhub with explicit expires-in",
+			config.Credential{
+				"type":          "docker_registry",
+				"registry":      "https://registry-1-stage.docker.io",
+				"username":      "my-org",
+				"connection-id": "123e4567-e89b-42d3-a456-426614174000",
+				"expires-in":    "900",
+			},
+			&DockerHubOIDCParameters{
+				ConnectionID: "123e4567-e89b-42d3-a456-426614174000",
+				Username:     "my-org",
+				ExpiresIn:    "900",
+				Registry:     "https://registry-1-stage.docker.io",
+			},
+		},
+		{
+			"looks like dockerhub but missing username",
+			config.Credential{
+				"type":          "docker_registry",
+				"registry":      "registry-1.docker.io",
+				"connection-id": "123e4567-e89b-42d3-a456-426614174000",
+			},
+			nil,
+		},
+		{
+			"looks like dockerhub but unsupported registry",
+			config.Credential{
+				"type":          "docker_registry",
+				"registry":      "ghcr.io",
+				"username":      "my-org",
+				"connection-id": "123e4567-e89b-42d3-a456-426614174000",
+			},
+			nil,
 		},
 	}
 

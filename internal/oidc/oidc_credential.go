@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -68,6 +69,17 @@ func (g *GCPOIDCParameters) Name() string {
 	return "gcp"
 }
 
+type DockerHubOIDCParameters struct {
+	ConnectionID string
+	Username     string
+	ExpiresIn    string
+	Registry     string
+}
+
+func (d *DockerHubOIDCParameters) Name() string {
+	return "dockerhub"
+}
+
 type OIDCCredential struct {
 	parameters  OIDCParameters
 	cachedToken string
@@ -110,6 +122,17 @@ func CreateOIDCCredential(cred config.Credential) (*OIDCCredential, error) {
 	// gcp values
 	workloadIdentityProvider := cred.GetString("workload-identity-provider")
 	serviceAccount := cred.GetString("service-account")
+
+	// docker hub values
+	connectionID := cred.GetString("connection-id")
+	username := cred.GetString("username")
+	registry := cred.GetString("registry")
+	if registry == "" {
+		registry = cred.GetString("url")
+	}
+	if registry == "" {
+		registry = cred.GetString("host")
+	}
 
 	switch {
 	case tenantID != "" && clientID != "":
@@ -165,6 +188,13 @@ func CreateOIDCCredential(cred config.Credential) (*OIDCCredential, error) {
 			ServiceAccount:           serviceAccount,
 			Audience:                 audience,
 		}
+	case connectionID != "" && username != "" && isDockerHubRegistry(registry):
+		parameters = &DockerHubOIDCParameters{
+			ConnectionID: connectionID,
+			Username:     username,
+			ExpiresIn:    cred.GetString("expires-in"),
+			Registry:     registry,
+		}
 	}
 
 	if parameters == nil {
@@ -210,6 +240,8 @@ func GetOrRefreshOIDCToken(cred *OIDCCredential, ctx context.Context) (string, e
 		oidcAccessToken, err = GetCloudsmithAccessTokenForDevOps(ctx, *params)
 	case *GCPOIDCParameters:
 		oidcAccessToken, err = GetGCPAccessTokenForDevOps(ctx, *params)
+	case *DockerHubOIDCParameters:
+		oidcAccessToken, err = GetDockerHubAccessTokenForDevOps(ctx, *params)
 	default:
 		return "", fmt.Errorf("unsupported OIDC provider: %s", cred.Provider())
 	}
@@ -220,7 +252,54 @@ func GetOrRefreshOIDCToken(cred *OIDCCredential, ctx context.Context) (string, e
 	}
 
 	cred.cachedToken = oidcAccessToken.Token
-	cred.tokenExpiry = time.Now().Add(oidcAccessToken.ExpiresIn).Add(-time.Minute * 5) // refresh 5 minutes before expiry
+	cred.tokenExpiry = time.Now().Add(oidcAccessToken.ExpiresIn).Add(-calculateRefreshBuffer(oidcAccessToken.ExpiresIn))
 
 	return oidcAccessToken.Token, nil
+}
+
+// calculateRefreshBuffer chooses an early-refresh window based on token TTL:
+// 5 minutes for tokens longer than 5 minutes, 30 seconds for tokens between
+// 30 seconds and 5 minutes, and 10% of the TTL for tokens shorter than 30
+// seconds. This keeps short-lived tokens cacheable without waiting until their
+// exact expiry.
+func calculateRefreshBuffer(expiresIn time.Duration) time.Duration {
+	refreshBuffer := 5 * time.Minute
+	if expiresIn > refreshBuffer {
+		return refreshBuffer
+	}
+
+	// Very short-lived tokens, such as Docker Hub's 5-minute tokens, should stay
+	// cached briefly instead of being considered immediately expired.
+	refreshBuffer = 30 * time.Second
+	if expiresIn > refreshBuffer {
+		return refreshBuffer
+	}
+
+	return expiresIn / 10
+}
+
+func isDockerHubRegistry(registry string) bool {
+	_, ok := dockerHubRegistryHost(registry)
+	return ok
+}
+
+func dockerHubRegistryHost(registry string) (string, bool) {
+	if registry == "" {
+		return "", false
+	}
+
+	host := registry
+	if parsed, err := url.Parse(registry); err == nil && parsed.Hostname() != "" {
+		host = parsed.Hostname()
+	} else if parsed, err := url.Parse("//" + registry); err == nil && parsed.Hostname() != "" {
+		host = parsed.Hostname()
+	}
+
+	host = strings.ToLower(host)
+	switch host {
+	case "docker.io", "registry-1.docker.io", "registry-1-stage.docker.io", "registry.hub.docker.com":
+		return host, true
+	default:
+		return "", false
+	}
 }

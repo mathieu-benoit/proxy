@@ -165,6 +165,10 @@ func (r *OIDCRegistry) TryAuthCredential(req *http.Request, ctx *goproxy.ProxyCt
 			logging.RequestLogf(ctx, "* authenticating request with OIDC token (host: %s)", host)
 			helpers.SetBearerAuthorization(req, token)
 		}
+	case *DockerHubOIDCParameters:
+		params := credential.parameters.(*DockerHubOIDCParameters)
+		logging.RequestLogf(ctx, "* authenticating request with OIDC basic auth (host: %s)", host)
+		helpers.SetBasicAuthorization(req, params.Username, token)
 	default:
 		logging.RequestLogf(ctx, "* authenticating request with OIDC token (host: %s)", host)
 		helpers.SetBearerAuthorization(req, token)

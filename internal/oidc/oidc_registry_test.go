@@ -462,6 +462,23 @@ func gcpCred(wip, url string) config.Credential {
 	}
 }
 
+func mockDockerHubOIDC(t *testing.T, token string) {
+	t.Helper()
+	httpmock.RegisterResponder("GET", "https://token.actions.example.com?audience=https%3A%2F%2Fidentity.docker.com",
+		httpmock.NewStringResponder(200, `{"count": 1, "value": "sometoken"}`))
+	httpmock.RegisterResponder("POST", "https://identity.docker.com/oauth/token",
+		httpmock.NewStringResponder(200, `{"access_token":"`+token+`"}`))
+}
+
+func dockerHubCred(connectionID, username, registry string) config.Credential {
+	return config.Credential{
+		"type":          "docker_registry",
+		"connection-id": connectionID,
+		"username":      username,
+		"registry":      registry,
+	}
+}
+
 func TestOIDCRegistry_TryAuth_GCP_UsesBearer(t *testing.T) {
 	setupOIDCEnv(t)
 	httpmock.Activate()
@@ -502,6 +519,28 @@ func TestOIDCRegistry_TryAuth_GCP_DockerUsesBasicAuth(t *testing.T) {
 	assert.Equal(t, "oauth2accesstoken", user, "GCP docker should use oauth2accesstoken as username")
 	assert.Equal(t, "__gcp_token__", pass, "GCP docker should use token as password")
 	assert.Empty(t, req.Header.Get("X-Api-Key"), "GCP should not set X-Api-Key")
+}
+
+func TestOIDCRegistry_TryAuth_DockerHub_UsesBasicAuth(t *testing.T) {
+	setupOIDCEnv(t)
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset()
+	mockDockerHubOIDC(t, "__dockerhub_token__")
+
+	r := NewOIDCRegistry()
+
+	cred := dockerHubCred("123e4567-e89b-42d3-a456-426614174000", "my-org", "https://registry-1.docker.io")
+	r.Register(cred, []string{"registry"}, "docker registry")
+
+	req := httptest.NewRequest("GET", "https://registry-1.docker.io/v2/some-image/manifests/latest", nil)
+	ok := r.TryAuth(req, nil)
+
+	assert.True(t, ok, "Docker Hub OIDC should authenticate docker")
+	user, pass, hasBasic := req.BasicAuth()
+	assert.True(t, hasBasic, "Docker Hub OIDC should use Basic auth")
+	assert.Equal(t, "my-org", user, "Docker Hub OIDC should use organization name as username")
+	assert.Equal(t, "__dockerhub_token__", pass, "Docker Hub OIDC should use exchanged token as password")
+	assert.Empty(t, req.Header.Get("X-Api-Key"), "Docker Hub OIDC should not set X-Api-Key")
 }
 
 func TestOIDCRegistry_Register_IndexURLField(t *testing.T) {
