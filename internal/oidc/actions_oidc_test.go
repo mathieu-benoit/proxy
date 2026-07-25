@@ -1014,6 +1014,177 @@ func TestGetCloudsmithAccessToken(t *testing.T) {
 	}
 }
 
+func TestGetDockerHubAccessToken(t *testing.T) {
+	tests := []struct {
+		name          string
+		params        DockerHubOIDCParameters
+		githubToken   string
+		serverURL     string
+		serverHandler http.HandlerFunc
+		expectError   bool
+		expectedToken string
+	}{
+		{
+			name: "successful token exchange",
+			params: DockerHubOIDCParameters{
+				ConnectionID: "123e4567-e89b-42d3-a456-426614174000",
+				Username:     "my-org",
+				Registry:     "registry-1.docker.io",
+			},
+			githubToken: "test-github-jwt-token",
+			serverURL:   "https://identity.docker.com/oauth/token",
+			serverHandler: func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "POST", r.Method)
+				assert.Equal(t, "application/x-www-form-urlencoded", r.Header.Get("Content-Type"))
+				assert.Equal(t, "dependabot-proxy/1.0", r.Header.Get("User-Agent"))
+
+				bodyBytes, err := io.ReadAll(r.Body)
+				require.NoError(t, err)
+				defer r.Body.Close()
+
+				values, err := url.ParseQuery(string(bodyBytes))
+				require.NoError(t, err)
+				assert.Equal(t, "urn:ietf:params:oauth:grant-type:token-exchange", values.Get("grant_type"))
+				assert.Equal(t, "urn:ietf:params:oauth:token-type:id_token", values.Get("subject_token_type"))
+				assert.Equal(t, "test-github-jwt-token", values.Get("subject_token"))
+				assert.Equal(t, "123e4567-e89b-42d3-a456-426614174000", values.Get("connection_id"))
+				assert.Equal(t, "300", values.Get("expires_in"))
+
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(dockerHubTokenResponse{
+					AccessToken: "test-dockerhub-token",
+				})
+			},
+			expectedToken: "test-dockerhub-token",
+		},
+		{
+			name: "successful stage token exchange",
+			params: DockerHubOIDCParameters{
+				ConnectionID: "123e4567-e89b-42d3-a456-426614174000",
+				Username:     "my-org",
+				Registry:     "registry-1-stage.docker.io",
+				ExpiresIn:    "900",
+			},
+			githubToken: "test-github-jwt-token",
+			serverURL:   "https://identity-stage.docker.com/oauth/token",
+			serverHandler: func(w http.ResponseWriter, r *http.Request) {
+				bodyBytes, err := io.ReadAll(r.Body)
+				require.NoError(t, err)
+				defer r.Body.Close()
+
+				values, err := url.ParseQuery(string(bodyBytes))
+				require.NoError(t, err)
+				assert.Equal(t, "900", values.Get("expires_in"))
+
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(dockerHubTokenResponse{
+					AccessToken: "test-stage-token",
+				})
+			},
+			expectedToken: "test-stage-token",
+		},
+		{
+			name: "retries rate limited requests",
+			params: DockerHubOIDCParameters{
+				ConnectionID: "123e4567-e89b-42d3-a456-426614174000",
+				Username:     "my-org",
+				Registry:     "registry-1.docker.io",
+			},
+			githubToken: "test-github-jwt-token",
+			serverURL:   "https://identity.docker.com/oauth/token",
+			serverHandler: func() http.HandlerFunc {
+				calls := 0
+				return func(w http.ResponseWriter, r *http.Request) {
+					calls++
+					if calls == 1 {
+						w.Header().Set("Retry-After", "0")
+						w.WriteHeader(http.StatusTooManyRequests)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode(dockerHubTokenResponse{
+						AccessToken: "test-dockerhub-token",
+					})
+				}
+			}(),
+			expectedToken: "test-dockerhub-token",
+		},
+		{
+			name: "missing connection-id",
+			params: DockerHubOIDCParameters{
+				Username: "my-org",
+				Registry: "registry-1.docker.io",
+			},
+			githubToken: "test-github-jwt-token",
+			expectError: true,
+		},
+		{
+			name: "invalid connection-id",
+			params: DockerHubOIDCParameters{
+				ConnectionID: "not-a-uuid",
+				Username:     "my-org",
+				Registry:     "registry-1.docker.io",
+			},
+			githubToken: "test-github-jwt-token",
+			expectError: true,
+		},
+		{
+			name: "invalid expires-in",
+			params: DockerHubOIDCParameters{
+				ConnectionID: "123e4567-e89b-42d3-a456-426614174000",
+				Username:     "my-org",
+				Registry:     "registry-1.docker.io",
+				ExpiresIn:    "299",
+			},
+			githubToken: "test-github-jwt-token",
+			expectError: true,
+		},
+		{
+			name: "docker hub returns API error",
+			params: DockerHubOIDCParameters{
+				ConnectionID: "123e4567-e89b-42d3-a456-426614174000",
+				Username:     "my-org",
+				Registry:     "registry-1.docker.io",
+			},
+			githubToken: "test-github-jwt-token",
+			serverURL:   "https://identity.docker.com/oauth/token",
+			serverHandler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusBadRequest)
+				w.Write([]byte(`{"description":"bad connection"}`))
+			},
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+
+			if tt.serverHandler != nil {
+				httpmock.Activate()
+				defer httpmock.DeactivateAndReset()
+
+				httpmock.RegisterResponder("POST", tt.serverURL, httpmock.Responder(func(req *http.Request) (*http.Response, error) {
+					rr := httptest.NewRecorder()
+					tt.serverHandler(rr, req)
+					return rr.Result(), nil
+				}))
+			}
+
+			dockerHubToken, err := GetDockerHubAccessToken(ctx, tt.params, tt.githubToken)
+
+			if tt.expectError {
+				require.Error(t, err)
+				return
+			}
+
+			require.NoError(t, err)
+			require.NotNil(t, dockerHubToken)
+			assert.Equal(t, tt.expectedToken, dockerHubToken.Token)
+		})
+	}
+}
+
 func TestGetGCPAccessToken(t *testing.T) {
 	tests := []struct {
 		name          string

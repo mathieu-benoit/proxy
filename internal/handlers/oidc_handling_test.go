@@ -31,6 +31,7 @@ func TestOIDCURLsAreAuthenticated(t *testing.T) {
 	testTenantId := "12345678-1234-1234-1234-123456789012"
 	testClientId := "87654321-4321-4321-4321-210987654321"
 	testRegion := "us-east-1"
+	testConnectionID := "123e4567-e89b-42d3-a456-426614174000"
 	testCases := []struct {
 		name               string
 		provider           string
@@ -385,6 +386,28 @@ func TestOIDCURLsAreAuthenticated(t *testing.T) {
 			},
 			urlsToAuthenticate: []string{
 				"https://us-central1-docker.pkg.dev/some-package",
+			},
+		},
+		{
+			name:     "Docker",
+			provider: "dockerhub",
+			handlerFactory: func(creds config.Credentials) oidcHandler {
+				return NewDockerRegistryHandler(creds, &http.Transport{}, nil)
+			},
+			credentials: config.Credentials{
+				config.Credential{
+					"type":          "docker_registry",
+					"registry":      "https://registry-1.docker.io",
+					"username":      "my-org",
+					"connection-id": testConnectionID,
+				},
+			},
+			urlMocks: []mockHttpRequest{},
+			expectedLogLines: []string{
+				"registered dockerhub OIDC credentials for docker registry: https://registry-1.docker.io",
+			},
+			urlsToAuthenticate: []string{
+				"https://registry-1.docker.io/v2/some-image/manifests/latest",
 			},
 		},
 		//
@@ -1647,6 +1670,16 @@ func TestOIDCURLsAreAuthenticated(t *testing.T) {
 						"expires_in": 3600,
 						"token_type": "urn:ietf:params:oauth:token-type:access_token"
 				}`))
+			case "dockerhub":
+				httpmock.RegisterResponder("GET", tokenUrl+"?audience=https%3A%2F%2Fidentity.docker.com",
+					httpmock.NewStringResponder(200, `{
+						"count": 1,
+						"value": "sometoken"
+				}`))
+				httpmock.RegisterResponder("POST", "https://identity.docker.com/oauth/token",
+					httpmock.NewStringResponder(200, `{
+						"access_token": "__test_token__"
+				}`))
 			default:
 				t.Fatal("unsupported provider in test case: " + tc.provider)
 			}
@@ -1683,6 +1716,11 @@ func TestOIDCURLsAreAuthenticated(t *testing.T) {
 					} else {
 						assertHasTokenAuth(t, req, "Bearer", "__test_token__", "package url: "+urlToAuth)
 					}
+				case "dockerhub":
+					user, pass, ok := req.BasicAuth()
+					assert.True(t, ok, "package url: "+urlToAuth+" should use Basic auth for Docker Hub")
+					assert.Equal(t, "my-org", user, "package url: "+urlToAuth+" should use Docker Hub org as username")
+					assert.Equal(t, "__test_token__", pass, "package url: "+urlToAuth+" should include Docker Hub token as password")
 				default:
 					assertHasTokenAuth(t, req, "Bearer", "__test_token__", "package url: "+urlToAuth)
 				}
