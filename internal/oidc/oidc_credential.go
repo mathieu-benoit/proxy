@@ -291,7 +291,7 @@ func isDockerHubRegistry(registry string) bool {
 	}
 
 	switch strings.ToLower(host) {
-	case "docker.io", "registry-1.docker.io", "registry-1-stage.docker.io", "dhi.io", "registry.hub.docker.com":
+	case "docker.io", "registry-1.docker.io", "registry-1-stage.docker.io", "registry.hub.docker.com":
 		return true
 	default:
 		return false

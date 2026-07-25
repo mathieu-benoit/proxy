@@ -942,7 +942,10 @@ func getDockerHubExpiresIn(raw string) (int, error) {
 	}
 
 	expiresIn, err := strconv.Atoi(strings.TrimSpace(raw))
-	if err != nil || expiresIn < dockerHubMinExpiresIn || expiresIn > dockerHubMaxExpiresIn {
+	if err != nil {
+		return 0, fmt.Errorf("invalid expires-in: must be a valid integer")
+	}
+	if expiresIn < dockerHubMinExpiresIn || expiresIn > dockerHubMaxExpiresIn {
 		return 0, fmt.Errorf("invalid expires-in: must be between %d and %d", dockerHubMinExpiresIn, dockerHubMaxExpiresIn)
 	}
 
