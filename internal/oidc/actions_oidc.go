@@ -42,7 +42,7 @@ const (
 	dockerHubMaxRetries        = 5
 )
 
-var dockerHubConnectionIDRe = regexp.MustCompile(`(?i)\A[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z`)
+var dockerHubConnectionIDRegex = regexp.MustCompile(`(?i)\A[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z`)
 
 // tokenResponse represents the response from GitHub's OIDC provider
 type tokenResponse struct {
@@ -698,7 +698,7 @@ func GetDockerHubAccessToken(ctx context.Context, params DockerHubOIDCParameters
 	if params.ConnectionID == "" {
 		return nil, fmt.Errorf("connection-id is required")
 	}
-	if !dockerHubConnectionIDRe.MatchString(params.ConnectionID) {
+	if !dockerHubConnectionIDRegex.MatchString(params.ConnectionID) {
 		return nil, fmt.Errorf("invalid connection-id: must be a valid UUID (versions 1-5)")
 	}
 	if params.Username == "" {
