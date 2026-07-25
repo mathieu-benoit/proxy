@@ -279,8 +279,13 @@ func calculateRefreshBuffer(expiresIn time.Duration) time.Duration {
 }
 
 func isDockerHubRegistry(registry string) bool {
+	_, ok := dockerHubRegistryHost(registry)
+	return ok
+}
+
+func dockerHubRegistryHost(registry string) (string, bool) {
 	if registry == "" {
-		return false
+		return "", false
 	}
 
 	host := registry
@@ -290,10 +295,11 @@ func isDockerHubRegistry(registry string) bool {
 		host = parsed.Hostname()
 	}
 
-	switch strings.ToLower(host) {
+	host = strings.ToLower(host)
+	switch host {
 	case "docker.io", "registry-1.docker.io", "registry-1-stage.docker.io", "registry.hub.docker.com":
-		return true
+		return host, true
 	default:
-		return false
+		return "", false
 	}
 }

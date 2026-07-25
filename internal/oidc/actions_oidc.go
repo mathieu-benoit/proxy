@@ -42,7 +42,7 @@ const (
 	dockerHubMaxRetries        = 5
 )
 
-var dockerHubConnectionIDRegex = regexp.MustCompile(`(?i)\A[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z`)
+var dockerHubConnectionIDRegexp = regexp.MustCompile(`(?i)\A[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z`)
 
 // tokenResponse represents the response from GitHub's OIDC provider
 type tokenResponse struct {
@@ -698,7 +698,7 @@ func GetDockerHubAccessToken(ctx context.Context, params DockerHubOIDCParameters
 	if params.ConnectionID == "" {
 		return nil, fmt.Errorf("connection-id is required")
 	}
-	if !dockerHubConnectionIDRegex.MatchString(params.ConnectionID) {
+	if !dockerHubConnectionIDRegexp.MatchString(params.ConnectionID) {
 		return nil, fmt.Errorf("invalid connection-id: must be a valid UUID (versions 1-5)")
 	}
 	if params.Username == "" {
@@ -927,10 +927,11 @@ func GetGCPAccessTokenForDevOps(ctx context.Context, params GCPOIDCParameters) (
 }
 
 func getDockerHubIdentityHost(registry string) (string, error) {
-	if !isDockerHubRegistry(registry) {
+	host, ok := dockerHubRegistryHost(registry)
+	if !ok {
 		return "", fmt.Errorf("unsupported Docker Hub registry: %s", registry)
 	}
-	if strings.Contains(strings.ToLower(registry), "registry-1-stage.docker.io") {
+	if host == "registry-1-stage.docker.io" {
 		return dockerHubIdentityStageHost, nil
 	}
 	return dockerHubIdentityHost, nil
