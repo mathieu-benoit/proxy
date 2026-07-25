@@ -991,6 +991,8 @@ func postDockerHubTokenWithRetry(ctx context.Context, tokenURL string, formData 
 		case <-timer.C:
 		}
 	}
+
+	return nil, 0, fmt.Errorf("failed to exchange Docker Hub token after retries")
 }
 
 func parseDockerHubRetryAfter(value string) (time.Duration, bool) {
