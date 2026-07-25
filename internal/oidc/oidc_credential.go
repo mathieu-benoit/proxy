@@ -257,6 +257,11 @@ func GetOrRefreshOIDCToken(cred *OIDCCredential, ctx context.Context) (string, e
 	return oidcAccessToken.Token, nil
 }
 
+// calculateRefreshBuffer chooses an early-refresh window based on token TTL:
+// 5 minutes for tokens longer than 5 minutes, 30 seconds for tokens between
+// 30 seconds and 5 minutes, and 10% of the TTL for tokens shorter than 30
+// seconds. This keeps short-lived tokens cacheable without waiting until their
+// exact expiry.
 func calculateRefreshBuffer(expiresIn time.Duration) time.Duration {
 	refreshBuffer := 5 * time.Minute
 	if expiresIn > refreshBuffer {
