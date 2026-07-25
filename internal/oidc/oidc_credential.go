@@ -252,16 +252,25 @@ func GetOrRefreshOIDCToken(cred *OIDCCredential, ctx context.Context) (string, e
 	}
 
 	cred.cachedToken = oidcAccessToken.Token
-	refreshBuffer := 5 * time.Minute
-	if oidcAccessToken.ExpiresIn <= refreshBuffer {
-		refreshBuffer = 30 * time.Second
-		if oidcAccessToken.ExpiresIn <= refreshBuffer {
-			refreshBuffer = oidcAccessToken.ExpiresIn / 10
-		}
-	}
-	cred.tokenExpiry = time.Now().Add(oidcAccessToken.ExpiresIn).Add(-refreshBuffer)
+	cred.tokenExpiry = time.Now().Add(oidcAccessToken.ExpiresIn).Add(-calculateRefreshBuffer(oidcAccessToken.ExpiresIn))
 
 	return oidcAccessToken.Token, nil
+}
+
+func calculateRefreshBuffer(expiresIn time.Duration) time.Duration {
+	refreshBuffer := 5 * time.Minute
+	if expiresIn > refreshBuffer {
+		return refreshBuffer
+	}
+
+	// Very short-lived tokens, such as Docker Hub's 5-minute tokens, should stay
+	// cached briefly instead of being considered immediately expired.
+	refreshBuffer = 30 * time.Second
+	if expiresIn > refreshBuffer {
+		return refreshBuffer
+	}
+
+	return expiresIn / 10
 }
 
 func isDockerHubRegistry(registry string) bool {

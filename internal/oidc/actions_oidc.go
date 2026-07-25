@@ -699,7 +699,7 @@ func GetDockerHubAccessToken(ctx context.Context, params DockerHubOIDCParameters
 		return nil, fmt.Errorf("connection-id is required")
 	}
 	if !dockerHubConnectionIDRe.MatchString(params.ConnectionID) {
-		return nil, fmt.Errorf("invalid connection-id: must be a valid UUID")
+		return nil, fmt.Errorf("invalid connection-id: must be a valid UUID (versions 1-5)")
 	}
 	if params.Username == "" {
 		return nil, fmt.Errorf("username is required")
@@ -954,7 +954,7 @@ func postDockerHubTokenWithRetry(ctx context.Context, tokenURL string, formData 
 		Timeout: 10 * time.Second,
 	}
 
-	for attempt := 0; ; attempt++ {
+	for attempt := 0; attempt <= dockerHubMaxRetries; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(formData.Encode()))
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to create Docker Hub token request: %w", err)
@@ -974,7 +974,7 @@ func postDockerHubTokenWithRetry(ctx context.Context, tokenURL string, formData 
 			return nil, 0, fmt.Errorf("failed to read Docker Hub token response body: %w", readErr)
 		}
 
-		if resp.StatusCode != http.StatusTooManyRequests || attempt >= dockerHubMaxRetries {
+		if resp.StatusCode != http.StatusTooManyRequests || attempt == dockerHubMaxRetries {
 			return body, resp.StatusCode, nil
 		}
 
